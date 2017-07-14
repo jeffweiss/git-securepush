@@ -1,0 +1,9 @@
+[package]
+name = "git-securepush"
+version = "0.1.0"
+authors = ["Jeff Weiss <jweiss@polysync.io>"]
+
+[dependencies]
+git2 = "0.6.6"
+gpgme = "0.6.0"
+rand = "0.3.15"
