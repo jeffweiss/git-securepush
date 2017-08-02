@@ -1,15 +1,20 @@
 #[macro_use] extern crate lazy_static;
+extern crate crypto;
 extern crate git2;
 extern crate gpgme;
-extern crate crypto;
 extern crate regex;
+extern crate getopts;
 
-use git2::{Error, Oid, Repository};
-use std::process::{Command, ExitStatus, Stdio};
+use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
+
 use crypto::digest::Digest;
 use crypto::sha1::Sha1;
+use getopts::Options;
+use git2::{Error, Oid, Repository};
 use regex::Regex;
 
 const RSL_BRANCH_NAME: &'static str = "rsl";
@@ -464,7 +469,46 @@ fn find_most_recent_push_entry(repo: &Repository) -> Option<usize> {
     find_most_recent_push_entry_with_explicit_upper_bound(repo, count)
 }
 
+fn print_usage(program: &str, opts: Options) {
+    let brief = format!("Usage: {} [options]", program);
+    print!("{}", opts.usage(&brief));
+}
+
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    let program = args[0].clone();
+
+    let mut opts = Options::new();
+
+    opts.optflag("h", "help", "print this help menu");
+    opts.optflag("", "fetch", "securely fetch, logging this fetch in the RSL nonce bag");
+    opts.optflag("", "push", "securely push, logging this push in the RSL");
+
+
+    let matches = match opts.parse(&args[1..]) {
+        Ok(m) => m,
+        Err(f) => panic!(f.to_string()),
+    };
+
+    if matches.opt_present("h") {
+        print_usage(&program, opts);
+        return;
+    } else if matches.opt_present("fetch") {
+        secure_fetch();
+        return;
+    } else if matches.opt_present("push") {
+        secure_push();
+        return;
+    } else {
+        print_usage(&program, opts);
+        return;
+    }
+}
+
+fn secure_fetch() {
+}
+
+fn secure_push() {
     let repo = match Repository::open("/tmp/git") {
         Ok(repo) => repo,
         Err(e) => panic!("failed to open: {}", e),
