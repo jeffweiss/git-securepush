@@ -1,9 +1,16 @@
+#[macro_use] extern crate lazy_static;
 extern crate git2;
 extern crate gpgme;
+extern crate crypto;
+extern crate regex;
 
 use git2::{Error, Oid, Repository};
 use std::process::{Command, ExitStatus, Stdio};
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Write};
+use crypto::digest::Digest;
+use crypto::sha1::Sha1;
+use regex::Regex;
 
 const RSL_BRANCH_NAME: &'static str = "rsl";
 
@@ -97,7 +104,42 @@ fn rsl_init(repo: &Repository) -> RSLPushEntry {
     push_entry
 }
 
-fn rsl_fetch() {
+fn rsl_fetch(repo: &Repository) -> Option<usize> {
+    let fetch_process = Command::new("git")
+        .arg("-C")
+        .arg(repo.workdir().unwrap())
+        .arg("fetch")
+        .arg("-q")
+        .arg("origin")
+        .arg(RSL_BRANCH_NAME)
+        .status()
+        .unwrap();
+    assert!(fetch_process.success());
+
+    let checkout_process = Command::new("git")
+        .arg("-C")
+        .arg(repo.workdir().unwrap())
+        .arg("checkout")
+        .arg("-q")
+        .arg(RSL_BRANCH_NAME)
+        .status()
+        .unwrap();
+    assert!(checkout_process.success());
+
+    let last_verified_push_entry = find_most_recent_push_entry(repo);
+
+    let merge_process = Command::new("git")
+        .arg("-C")
+        .arg(repo.workdir().unwrap())
+        .arg("checkout")
+        .arg("-q")
+        .arg(RSL_BRANCH_NAME)
+        .status()
+        .unwrap();
+    assert!(merge_process.success());
+
+
+    last_verified_push_entry
 }
 
 // fn create_initial_commit(repo: &Repository) -> Result<(), Error> {
@@ -264,7 +306,101 @@ fn push_branch(repo: &Repository, current_branch: &str) {
     assert!(push_process.success());
 }
 
-fn rsl_verify() {
+fn rsl_verify(repo: &Repository) {
+    let checkout_process = Command::new("git")
+        .arg("-C")
+        .arg(repo.workdir().unwrap())
+        .arg("checkout")
+        .arg("-q")
+        .arg(RSL_BRANCH_NAME)
+        .status()
+        .unwrap();
+    assert!(checkout_process.success());
+
+
+    let first_push_entry = find_first_push_entry(repo);
+    let mut last_push_entry = find_most_recent_push_entry(repo);
+    match last_push_entry {
+        Some(file) => {
+            if verify_push_entry_signature(repo, &file) {
+                println!("Signature verification succeeded");
+            } else {
+                println!("Signature verification failed");
+            }
+        },
+        None => println!("There is no prior RSL push entry. No need to verify signature"),
+    };
+
+    let mut verify = true;
+
+    while verify {
+        let upper_bound = match last_push_entry {
+            Some(num) => num - 1,
+            None => 0,
+        };
+        let second_to_last_push_entry = find_most_recent_push_entry_with_explicit_upper_bound(repo, upper_bound);
+
+        let starting_file_to_hash = match second_to_last_push_entry {
+            Some(num) => num,
+            None => 1,
+        };
+        let last_push_entry_expected_hash = calculate_hash_of_prior_entries(repo, starting_file_to_hash, upper_bound);
+        let last_push_entry_actual_hash = read_prev_hash_from_file(repo, last_push_entry.unwrap());
+        if last_push_entry_expected_hash == last_push_entry_actual_hash {
+            println!("Hash verification successful");
+        } else {
+            println!("Hash verification failed");
+            println!("  Expected hash: {}", last_push_entry_expected_hash);
+            println!("    Actual hash: {}", last_push_entry_actual_hash);
+            std::process::exit(2);
+        }
+
+        if last_push_entry == second_to_last_push_entry || last_push_entry == first_push_entry || last_push_entry == None {
+            verify = false;
+        }
+        last_push_entry = second_to_last_push_entry;
+    }
+}
+fn read_prev_hash_from_file(repo: &Repository, file: usize) -> String {
+    lazy_static! {
+        static ref PREV_HASH_REGEX: Regex = Regex::new(r"^PREV_HASH:([0-9a-f]{40})$").unwrap();
+    }
+    let filepath = repo.workdir().unwrap().join(format!("{}", file));
+    let mut contents = String::new();
+    File::open(filepath).unwrap().read_to_string(&mut contents);
+    let hash = match PREV_HASH_REGEX.captures(&contents) {
+        Some(cap) => cap.get(0).map_or("", |m| m.as_str()),
+        None => "",
+    };
+    String::from(hash)
+}
+
+
+fn calculate_hash_of_prior_entries(repo: &Repository, start: usize, last: usize) -> String {
+    //TODO change to a more secure hashing algo than sha1
+    let mut buffer = Vec::new();
+    let mut hasher = Sha1::new();
+
+    for n in start..last {
+        let filepath = repo.workdir().unwrap().join(format!("{}", n));
+
+        File::open(filepath).unwrap().read_to_end(&mut buffer);
+    }
+
+    hasher.input(&buffer);
+    let hex = hasher.result_str();
+    hex
+}
+
+fn verify_push_entry_signature(repo: &Repository, file: &usize) -> bool {
+    let filepath = repo.workdir().unwrap().join(format!("{}", file));
+    let verify_process = Command::new("gpg2")
+        .arg("--verify")
+        .arg(filepath)
+        .status()
+        .unwrap();
+
+    verify_process.success()
 }
 
 fn current_branch_name(repo: &Repository) -> String {
@@ -276,28 +412,56 @@ fn rsl_file_in_repo(repo: &Repository, file_entry: usize) -> bool {
     current_path.exists() && current_path.is_file()
 }
 
-fn find_most_recent_push_entry(repo: &Repository) -> Option<String> {
+fn file_is_push_entry(repo: &Repository, file: &String) -> bool {
+    let current_path = repo.workdir().unwrap().join(&file);
+    println!("Checking {:?}", current_path);
+    //TODO replace process call to grep
+    let grep_process = Command::new("grep")
+        .arg("-q")
+        .arg("-E")
+        .arg("-e")
+        .arg("^HEAD:[0-9a-f]{40}$")
+        .arg(current_path)
+        .status()
+        .unwrap();
+    grep_process.success()
+}
+
+fn find_first_push_entry_with_explicit_upper_bound(repo: &Repository, count: usize) -> Option<usize> {
+    for n in 1..count {
+        let stringified_file = format!("{}", n);
+        if file_is_push_entry(repo, &stringified_file) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn find_first_push_entry(repo: &Repository) -> Option<usize> {
     let count = count_files(repo);
+    find_first_push_entry_with_explicit_upper_bound(repo, count)
+}
+
+fn find_most_recent_push_entry_with_explicit_upper_bound(repo: &Repository, count: usize) -> Option<usize> {
 
     let mut current_file = count;
 
     while current_file > 0 && rsl_file_in_repo(&repo, current_file) {
-        current_file -= 1;
+        let stringified_file = format!("{}", current_file);
 
-        let current_path = repo.workdir().unwrap().join(format!("{}", current_file));
-        let grep_process = Command::new("grep")
-            .arg("-q")
-            .arg("^HEAD:[0-9a-f]+$")
-            .arg(current_path)
-            .status()
-            .unwrap();
-        if grep_process.success() {
-            break;
+        if file_is_push_entry(repo, &stringified_file) {
+            return Some(current_file);
         }
 
+        current_file -= 1;
     }
 
     None
+}
+
+fn find_most_recent_push_entry(repo: &Repository) -> Option<usize> {
+    let count = count_files(repo);
+    find_most_recent_push_entry_with_explicit_upper_bound(repo, count)
 }
 
 fn main() {
@@ -350,15 +514,16 @@ fn main() {
             .unwrap();
         assert!(reset_process.success());
 
-        rsl_fetch();
-        rsl_verify();
+        rsl_fetch(&repo);
+        rsl_verify(&repo);
 
         let last_push_entry = find_most_recent_push_entry(&repo);
+        println!("Most recent push entry: {:?}", last_push_entry);
     }
 
     push_branch(&repo, current_branch_name);
 
-    rsl_fetch();
-    rsl_verify();
+    rsl_fetch(&repo);
+    rsl_verify(&repo);
 }
 

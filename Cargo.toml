@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["Jeff Weiss <jweiss@polysync.io>"]
 
 [dependencies]
-git2 = "0.6.6"
-gpgme = "0.6.0"
-rand = "0.3.15"
+git2 = "0.6"
+gpgme = "0.6"
+rand = "0.3"
+rust-crypto = "0.2"
+regex = "0.2"
+lazy_static = "0.2"
